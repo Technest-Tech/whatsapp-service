@@ -65,7 +65,9 @@ export const DeviceProvider: React.FC<DeviceProviderProps> = ({ children }) => {
       setError(null);
       const response = await api.post('/devices', { name });
       if (response.data.success) {
-        setDevices(prev => [...prev, response.data.device]);
+        // Don't add to list immediately - wait for real-time update
+        // The device will be added via the 'device-update' socket event
+        console.log('Device creation initiated, waiting for real-time update...');
       } else {
         setError(response.data.error || 'Failed to add device');
       }
@@ -106,9 +108,16 @@ export const DeviceProvider: React.FC<DeviceProviderProps> = ({ children }) => {
   useEffect(() => {
     if (socket) {
       const handleDeviceUpdate = (device: Device) => {
-        setDevices(prev => 
-          prev.map(d => d.id === device.id ? device : d)
-        );
+        setDevices(prev => {
+          const existingDevice = prev.find(d => d.id === device.id);
+          if (existingDevice) {
+            // Update existing device
+            return prev.map(d => d.id === device.id ? device : d);
+          } else {
+            // Add new device
+            return [...prev, device];
+          }
+        });
       };
 
       const handleDeviceDeleted = (data: { deviceId: string }) => {

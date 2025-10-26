@@ -99,7 +99,20 @@ class DeviceManager {
           '--no-first-run',
           '--no-zygote',
           '--single-process',
-          '--disable-gpu'
+          '--disable-gpu',
+          '--disable-web-security',
+          '--disable-features=VizDisplayCompositor',
+          '--disable-extensions',
+          '--disable-plugins',
+          '--disable-default-apps',
+          '--disable-sync',
+          '--disable-translate',
+          '--hide-scrollbars',
+          '--mute-audio',
+          '--no-default-browser-check',
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding'
         ]
       }
     });
@@ -115,7 +128,7 @@ class DeviceManager {
       await Promise.race([
         client.initialize(),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Initialization timeout')), 30000)
+          setTimeout(() => reject(new Error('Initialization timeout')), 60000) // Increased to 60 seconds
         )
       ]);
     } catch (error) {
@@ -488,7 +501,20 @@ class DeviceManager {
             '--no-first-run',
             '--no-zygote',
             '--single-process',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--disable-web-security',
+            '--disable-features=VizDisplayCompositor',
+            '--disable-extensions',
+            '--disable-plugins',
+            '--disable-default-apps',
+            '--disable-sync',
+            '--disable-translate',
+            '--hide-scrollbars',
+            '--mute-audio',
+            '--no-default-browser-check',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding'
           ]
         }
       });
@@ -500,7 +526,7 @@ class DeviceManager {
       await Promise.race([
         newClient.initialize(),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('QR regeneration timeout')), 30000)
+          setTimeout(() => reject(new Error('QR regeneration timeout')), 60000) // Increased to 60 seconds
         )
       ]);
       
