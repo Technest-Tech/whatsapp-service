@@ -82,6 +82,12 @@ class DeviceManager {
     }
 
     const deviceDataDir = path.join(this.dataDir, deviceId);
+    
+    // Clean up any existing session data to prevent lock issues
+    if (await fs.pathExists(deviceDataDir)) {
+      await fs.remove(deviceDataDir);
+    }
+    
     await fs.ensureDir(deviceDataDir);
 
     const client = new Client({
