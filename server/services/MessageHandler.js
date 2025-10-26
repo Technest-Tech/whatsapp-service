@@ -1,56 +1,79 @@
 const moment = require('moment');
 
 class MessageHandler {
-  constructor(io) {
+  constructor(io, db) {
     this.io = io;
-    this.messageHistory = new Map(); // Store message history by deviceId
+    this.db = db;
+    this.messageHistory = new Map(); // Store message history by deviceId (for real-time)
   }
 
-  handleIncomingMessage(deviceId, message) {
-    // Store message in history
-    if (!this.messageHistory.has(deviceId)) {
-      this.messageHistory.set(deviceId, []);
-    }
-    
-    const deviceMessages = this.messageHistory.get(deviceId);
-    deviceMessages.push({
-      ...message,
-      receivedAt: new Date(),
-      id: message.id || `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-    });
-
-    // Keep only last 1000 messages per device
-    if (deviceMessages.length > 1000) {
-      deviceMessages.splice(0, deviceMessages.length - 1000);
-    }
-
-    // Emit to connected clients
-    this.io.to(`device-${deviceId}`).emit('message-received', {
-      deviceId,
-      message: {
+  async handleIncomingMessage(deviceId, message) {
+    try {
+      // Store message in database
+      await this.db.storeMessage(deviceId, {
         ...message,
-        receivedAt: new Date()
-      }
-    });
+        isIncoming: true,
+        timestamp: message.timestamp || Date.now()
+      });
 
-    // Emit to all clients for real-time updates
-    this.io.emit('new-message', {
-      deviceId,
-      message: {
-        ...message,
-        receivedAt: new Date()
+      // Store message in memory for real-time access
+      if (!this.messageHistory.has(deviceId)) {
+        this.messageHistory.set(deviceId, []);
       }
-    });
+      
+      const deviceMessages = this.messageHistory.get(deviceId);
+      deviceMessages.push({
+        ...message,
+        receivedAt: new Date(),
+        id: message.id || `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      });
+
+      // Keep only last 1000 messages per device in memory
+      if (deviceMessages.length > 1000) {
+        deviceMessages.splice(0, deviceMessages.length - 1000);
+      }
+
+      // Emit to connected clients
+      this.io.to(`device-${deviceId}`).emit('message-received', {
+        deviceId,
+        message: {
+          ...message,
+          receivedAt: new Date()
+        }
+      });
+
+      // Emit to all clients for real-time updates
+      this.io.emit('new-message', {
+        deviceId,
+        message: {
+          ...message,
+          receivedAt: new Date()
+        }
+      });
+    } catch (error) {
+      console.error('Error handling incoming message:', error);
+    }
   }
 
-  getMessageHistory(deviceId, limit = 100) {
-    const deviceMessages = this.messageHistory.get(deviceId) || [];
-    return deviceMessages
-      .slice(-limit)
-      .map(msg => ({
+  async getMessageHistory(deviceId, limit = 100) {
+    try {
+      // Get messages from database for persistence
+      const dbMessages = await this.db.getMessageHistory(deviceId, limit);
+      return dbMessages.map(msg => ({
         ...msg,
-        formattedTime: moment(msg.timestamp * 1000).format('YYYY-MM-DD HH:mm:ss')
+        formattedTime: moment(msg.timestamp).format('YYYY-MM-DD HH:mm:ss')
       }));
+    } catch (error) {
+      console.error('Error getting message history from database:', error);
+      // Fallback to memory storage
+      const deviceMessages = this.messageHistory.get(deviceId) || [];
+      return deviceMessages
+        .slice(-limit)
+        .map(msg => ({
+          ...msg,
+          formattedTime: moment(msg.timestamp * 1000).format('YYYY-MM-DD HH:mm:ss')
+        }));
+    }
   }
 
   getMessagesByChat(deviceId, chatId, limit = 50) {

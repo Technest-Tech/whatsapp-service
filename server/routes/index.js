@@ -93,10 +93,10 @@ module.exports = (deviceManager, messageHandler) => {
   });
 
   // Message history routes
-  router.get('/devices/:id/messages', (req, res) => {
+  router.get('/devices/:id/messages', async (req, res) => {
     try {
       const { limit = 100 } = req.query;
-      const messages = messageHandler.getMessageHistory(req.params.id, parseInt(limit));
+      const messages = await messageHandler.getMessageHistory(req.params.id, parseInt(limit));
       res.json({ success: true, messages });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

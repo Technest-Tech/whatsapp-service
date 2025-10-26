@@ -6,11 +6,13 @@ const { v4: uuidv4 } = require('uuid');
 const Database = require('../database/database');
 
 class DeviceManager {
-  constructor(io) {
+  constructor(io, messageHandler = null) {
     this.io = io;
     this.devices = new Map();
-    this.dataDir = path.join(__dirname, '../../data');
+    this.environment = process.env.NODE_ENV || 'production';
+    this.dataDir = path.join(__dirname, '../../data', this.environment);
     this.db = new Database();
+    this.messageHandler = messageHandler;
     this.ensureDataDir();
     this.loadDevices();
   }
@@ -40,16 +42,43 @@ class DeviceManager {
         this.devices.set(deviceData.id, device);
       }
       
-      console.log(`Loaded ${devicesData.length} devices from database`);
+      console.log(`Loaded ${devicesData.length} devices from database for environment: ${this.environment}`);
+      
+      // Attempt to reconnect devices that were previously connected
+      await this.reconnectDevices();
     } catch (error) {
       console.error('Error loading devices:', error);
     }
   }
 
-  async createDevice(deviceName) {
-    const deviceId = uuidv4();
-    const deviceDataDir = path.join(this.dataDir, deviceId);
+  async reconnectDevices() {
+    const devicesToReconnect = Array.from(this.devices.values()).filter(
+      device => device.status === 'connected' || device.status === 'initializing'
+    );
     
+    console.log(`Attempting to reconnect ${devicesToReconnect.length} devices...`);
+    
+    for (const device of devicesToReconnect) {
+      try {
+        await this.initializeDevice(device.id);
+      } catch (error) {
+        console.error(`Failed to reconnect device ${device.id}:`, error);
+        await this.updateDeviceStatus(device.id, 'disconnected');
+      }
+    }
+  }
+
+  async initializeDevice(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device) {
+      throw new Error('Device not found');
+    }
+
+    if (device.client) {
+      return device; // Already initialized
+    }
+
+    const deviceDataDir = path.join(this.dataDir, deviceId);
     await fs.ensureDir(deviceDataDir);
 
     const client = new Client({
@@ -72,10 +101,46 @@ class DeviceManager {
       }
     });
 
+    device.client = client;
+    device.status = 'initializing';
+    this.setupClientEvents(device);
+    
+    await this.updateDeviceStatus(deviceId, 'initializing');
+    
+    return device;
+  }
+
+  async updateDeviceStatus(deviceId, status) {
+    try {
+      await this.db.updateDevice(deviceId, { 
+        status,
+        lastSeen: new Date()
+      });
+      
+      const device = this.devices.get(deviceId);
+      if (device) {
+        device.status = status;
+        device.lastSeen = new Date();
+      }
+      
+      // Emit status update to connected clients
+      this.io.emit('device-status-update', {
+        deviceId,
+        status,
+        lastSeen: new Date()
+      });
+    } catch (error) {
+      console.error('Error updating device status:', error);
+    }
+  }
+
+  async createDevice(deviceName) {
+    const deviceId = uuidv4();
+    
     const device = {
       id: deviceId,
       name: deviceName,
-      client,
+      client: null,
       status: 'initializing',
       qrCode: null,
       lastSeen: new Date(),
@@ -83,9 +148,8 @@ class DeviceManager {
     };
 
     this.devices.set(deviceId, device);
-    this.setupClientEvents(device);
     
-    // Save to database
+    // Save to database first
     try {
       await this.db.createDevice({
         id: deviceId,
@@ -94,6 +158,15 @@ class DeviceManager {
       });
     } catch (error) {
       console.error('Error saving device to database:', error);
+      throw error;
+    }
+    
+    // Initialize the device client
+    try {
+      await this.initializeDevice(deviceId);
+    } catch (error) {
+      console.error('Error initializing device client:', error);
+      await this.updateDeviceStatus(deviceId, 'disconnected');
     }
     
     return device;
@@ -124,15 +197,7 @@ class DeviceManager {
       device.qrCode = null;
       device.lastSeen = new Date();
       
-      // Update database
-      try {
-        await this.db.updateDevice(id, {
-          status: 'connected',
-          lastSeen: device.lastSeen
-        });
-      } catch (error) {
-        console.error('Error updating device status in database:', error);
-      }
+      await this.updateDeviceStatus(id, 'connected');
       
       this.io.to(`device-${id}`).emit('device-ready', { deviceId: id });
       this.io.emit('device-update', this.getDeviceInfo(device));
@@ -143,14 +208,7 @@ class DeviceManager {
     client.on('authenticated', async () => {
       device.status = 'authenticated';
       
-      // Update database
-      try {
-        await this.db.updateDevice(id, {
-          status: 'authenticated'
-        });
-      } catch (error) {
-        console.error('Error updating device status in database:', error);
-      }
+      await this.updateDeviceStatus(id, 'authenticated');
       
       this.io.emit('device-update', this.getDeviceInfo(device));
     });
@@ -158,14 +216,7 @@ class DeviceManager {
     client.on('auth_failure', async (msg) => {
       device.status = 'auth_failed';
       
-      // Update database
-      try {
-        await this.db.updateDevice(id, {
-          status: 'auth_failed'
-        });
-      } catch (error) {
-        console.error('Error updating device status in database:', error);
-      }
+      await this.updateDeviceStatus(id, 'auth_failed');
       
       this.io.to(`device-${id}`).emit('auth-failure', { 
         deviceId: id, 
@@ -177,14 +228,7 @@ class DeviceManager {
     client.on('disconnected', async (reason) => {
       device.status = 'disconnected';
       
-      // Update database
-      try {
-        await this.db.updateDevice(id, {
-          status: 'disconnected'
-        });
-      } catch (error) {
-        console.error('Error updating device status in database:', error);
-      }
+      await this.updateDeviceStatus(id, 'disconnected');
       
       this.io.to(`device-${id}`).emit('device-disconnected', { 
         deviceId: id, 
@@ -194,19 +238,24 @@ class DeviceManager {
     });
 
     client.on('message', async (message) => {
+      const messageData = {
+        id: message.id._serialized,
+        from: message.from,
+        to: message.to,
+        body: message.body,
+        timestamp: message.timestamp,
+        type: message.type,
+        isGroup: message.from.includes('@g.us'),
+        isForwarded: message.isForwarded,
+        fromMe: message.fromMe
+      };
+
+      // Handle incoming message through MessageHandler
+      await this.messageHandler.handleIncomingMessage(id, messageData);
+
       this.io.to(`device-${id}`).emit('new-message', {
         deviceId: id,
-        message: {
-          id: message.id._serialized,
-          from: message.from,
-          to: message.to,
-          body: message.body,
-          timestamp: message.timestamp,
-          type: message.type,
-          isGroup: message.from.includes('@g.us'),
-          isForwarded: message.isForwarded,
-          fromMe: message.fromMe
-        }
+        message: messageData
       });
     });
 
@@ -225,7 +274,8 @@ class DeviceManager {
       status: device.status,
       qrCode: device.qrCode,
       lastSeen: device.lastSeen,
-      createdAt: device.createdAt
+      createdAt: device.createdAt,
+      environment: this.environment
     };
   }
 

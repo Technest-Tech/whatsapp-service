@@ -26,8 +26,10 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Initialize services
-const deviceManager = new DeviceManager(io);
-const messageHandler = new MessageHandler(io);
+const messageHandler = new MessageHandler(io, null); // Will be updated after deviceManager is created
+const deviceManager = new DeviceManager(io, messageHandler);
+// Update messageHandler with database reference
+messageHandler.db = deviceManager.db;
 
 // Routes
 app.use('/api', routes(deviceManager, messageHandler));
