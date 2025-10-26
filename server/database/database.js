@@ -6,7 +6,7 @@ class Database {
   constructor() {
     this.db = null;
     this.environment = process.env.NODE_ENV || 'production';
-    this.dbPath = path.join(__dirname, '../../data/database.sqlite');
+    this.dbPath = path.join(__dirname, '../../data', `${this.environment}-database.sqlite`);
     this.init();
   }
 
