@@ -58,6 +58,19 @@ io.on('connection', (socket) => {
   socket.on('leave-device-room', (deviceId) => {
     socket.leave(`device-${deviceId}`);
   });
+  
+  socket.on('request-qr-code', async (deviceId) => {
+    try {
+      console.log(`QR code refresh requested for device: ${deviceId}`);
+      await deviceManager.regenerateQRCode(deviceId);
+    } catch (error) {
+      console.error('Error refreshing QR code:', error);
+      socket.emit('qr-refresh-error', { 
+        deviceId, 
+        error: error.message 
+      });
+    }
+  });
 });
 
 // Error handling middleware

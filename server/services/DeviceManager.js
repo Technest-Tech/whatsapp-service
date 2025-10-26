@@ -289,29 +289,39 @@ class DeviceManager {
   }
 
   async deleteDevice(deviceId) {
-    const device = this.devices.get(deviceId);
-    if (device) {
-      try {
-        if (device.client) {
-          await device.client.destroy();
-        }
-        this.devices.delete(deviceId);
-        
-        // Delete from database
-        await this.db.deleteDevice(deviceId);
-        
-        // Clean up device data directory
-        const deviceDataDir = path.join(this.dataDir, deviceId);
-        await fs.remove(deviceDataDir);
-        
-        this.io.emit('device-deleted', { deviceId });
-        return true;
-      } catch (error) {
-        console.error('Error deleting device:', error);
+    try {
+      // Check if device exists in database first
+      const dbDevice = await this.db.getDevice(deviceId);
+      if (!dbDevice) {
+        console.log(`Device ${deviceId} not found in database`);
         return false;
       }
+
+      // Get device from memory if it exists
+      const device = this.devices.get(deviceId);
+      
+      // Clean up client if it exists
+      if (device && device.client) {
+        await device.client.destroy();
+      }
+      
+      // Remove from memory
+      this.devices.delete(deviceId);
+      
+      // Delete from database
+      await this.db.deleteDevice(deviceId);
+      
+      // Clean up device data directory
+      const deviceDataDir = path.join(this.dataDir, deviceId);
+      await fs.remove(deviceDataDir);
+      
+      this.io.emit('device-deleted', { deviceId });
+      console.log(`Device ${deviceId} deleted successfully`);
+      return true;
+    } catch (error) {
+      console.error('Error deleting device:', error);
+      return false;
     }
-    return false;
   }
 
   async sendMessage(deviceId, to, message) {
@@ -421,6 +431,41 @@ class DeviceManager {
       return true;
     } catch (error) {
       throw new Error(`Failed to delete API key: ${error.message}`);
+    }
+  }
+
+  async regenerateQRCode(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device || !device.client) {
+      throw new Error('Device not found or not initialized');
+    }
+
+    try {
+      // Destroy current client and create a new one
+      await device.client.destroy();
+      
+      // Create new client
+      const newClient = new Client({
+        authStrategy: new LocalAuth({
+          clientId: deviceId,
+          dataPath: path.join(this.dataDir, deviceId)
+        }),
+        puppeteer: {
+          headless: true,
+          args: ['--no-sandbox', '--disable-setuid-sandbox']
+        }
+      });
+
+      device.client = newClient;
+      this.setupClientEvents(device);
+      
+      // Initialize the new client
+      await newClient.initialize();
+      
+      return true;
+    } catch (error) {
+      console.error('Error regenerating QR code:', error);
+      throw error;
     }
   }
 }
