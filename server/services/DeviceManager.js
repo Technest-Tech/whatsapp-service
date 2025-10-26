@@ -91,6 +91,7 @@ class DeviceManager {
       }),
       puppeteer: {
         headless: true,
+        executablePath: '/usr/bin/chromium-browser',
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -485,6 +486,7 @@ class DeviceManager {
         }),
         puppeteer: {
           headless: true,
+          executablePath: '/usr/bin/chromium-browser',
           args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
