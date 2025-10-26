@@ -44,6 +44,9 @@ class DeviceManager {
       
       console.log(`Loaded ${devicesData.length} devices from database for environment: ${this.environment}`);
       
+      // Clean up any stuck devices first
+      await this.cleanupStuckDevices();
+      
       // Attempt to reconnect devices that were previously connected
       await this.reconnectDevices();
     } catch (error) {
@@ -53,7 +56,7 @@ class DeviceManager {
 
   async reconnectDevices() {
     const devicesToReconnect = Array.from(this.devices.values()).filter(
-      device => device.status === 'connected' || device.status === 'initializing'
+      device => device.status === 'connected' || device.status === 'authenticated'
     );
     
     console.log(`Attempting to reconnect ${devicesToReconnect.length} devices...`);
@@ -106,6 +109,21 @@ class DeviceManager {
     this.setupClientEvents(device);
     
     await this.updateDeviceStatus(deviceId, 'initializing');
+    
+    // Initialize the client with timeout
+    try {
+      await Promise.race([
+        client.initialize(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Initialization timeout')), 30000)
+        )
+      ]);
+    } catch (error) {
+      console.error(`Failed to initialize device ${deviceId}:`, error);
+      device.status = 'disconnected';
+      await this.updateDeviceStatus(deviceId, 'disconnected');
+      throw error;
+    }
     
     return device;
   }
@@ -302,7 +320,11 @@ class DeviceManager {
       
       // Clean up client if it exists
       if (device && device.client) {
-        await device.client.destroy();
+        try {
+          await device.client.destroy();
+        } catch (error) {
+          console.log(`Client already destroyed for device ${deviceId}`);
+        }
       }
       
       // Remove from memory
@@ -436,13 +458,19 @@ class DeviceManager {
 
   async regenerateQRCode(deviceId) {
     const device = this.devices.get(deviceId);
-    if (!device || !device.client) {
-      throw new Error('Device not found or not initialized');
+    if (!device) {
+      throw new Error('Device not found');
     }
 
     try {
-      // Destroy current client and create a new one
-      await device.client.destroy();
+      // Destroy current client if it exists
+      if (device.client) {
+        try {
+          await device.client.destroy();
+        } catch (error) {
+          console.log(`Client already destroyed for device ${deviceId}`);
+        }
+      }
       
       // Create new client
       const newClient = new Client({
@@ -452,20 +480,57 @@ class DeviceManager {
         }),
         puppeteer: {
           headless: true,
-          args: ['--no-sandbox', '--disable-setuid-sandbox']
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu'
+          ]
         }
       });
 
       device.client = newClient;
       this.setupClientEvents(device);
       
-      // Initialize the new client
-      await newClient.initialize();
+      // Initialize the new client with timeout
+      await Promise.race([
+        newClient.initialize(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('QR regeneration timeout')), 30000)
+        )
+      ]);
       
       return true;
     } catch (error) {
       console.error('Error regenerating QR code:', error);
+      device.status = 'disconnected';
+      await this.updateDeviceStatus(deviceId, 'disconnected');
       throw error;
+    }
+  }
+
+  async cleanupStuckDevices() {
+    const stuckDevices = Array.from(this.devices.values()).filter(
+      device => device.status === 'initializing'
+    );
+    
+    console.log(`Found ${stuckDevices.length} stuck devices, cleaning up...`);
+    
+    for (const device of stuckDevices) {
+      try {
+        if (device.client) {
+          await device.client.destroy();
+        }
+        device.status = 'disconnected';
+        await this.updateDeviceStatus(device.id, 'disconnected');
+        console.log(`Cleaned up stuck device: ${device.id}`);
+      } catch (error) {
+        console.error(`Error cleaning up device ${device.id}:`, error);
+      }
     }
   }
 }

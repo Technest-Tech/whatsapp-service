@@ -54,6 +54,16 @@ module.exports = (deviceManager, messageHandler) => {
     }
   });
 
+  // Cleanup stuck devices
+  router.post('/devices/cleanup', async (req, res) => {
+    try {
+      await deviceManager.cleanupStuckDevices();
+      res.json({ success: true, message: 'Stuck devices cleaned up' });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   // Messaging routes
   router.post('/devices/:id/send', async (req, res) => {
     try {
