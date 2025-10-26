@@ -95,24 +95,15 @@ class DeviceManager {
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote',
-          '--single-process',
           '--disable-gpu',
-          '--disable-web-security',
-          '--disable-features=VizDisplayCompositor',
+          '--no-first-run',
           '--disable-extensions',
-          '--disable-plugins',
           '--disable-default-apps',
           '--disable-sync',
           '--disable-translate',
           '--hide-scrollbars',
           '--mute-audio',
-          '--no-default-browser-check',
-          '--disable-background-timer-throttling',
-          '--disable-backgrounding-occluded-windows',
-          '--disable-renderer-backgrounding'
+          '--no-default-browser-check'
         ]
       }
     });
@@ -128,14 +119,15 @@ class DeviceManager {
       await Promise.race([
         client.initialize(),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Initialization timeout')), 60000) // Increased to 60 seconds
+          setTimeout(() => reject(new Error('Initialization timeout')), 30000) // 30 seconds
         )
       ]);
     } catch (error) {
       console.error(`Failed to initialize device ${deviceId}:`, error);
       device.status = 'disconnected';
       await this.updateDeviceStatus(deviceId, 'disconnected');
-      throw error;
+      // Don't throw error, just log it and continue
+      console.log(`Device ${deviceId} will remain disconnected due to initialization failure`);
     }
     
     return device;
@@ -497,24 +489,15 @@ class DeviceManager {
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
             '--disable-gpu',
-            '--disable-web-security',
-            '--disable-features=VizDisplayCompositor',
+            '--no-first-run',
             '--disable-extensions',
-            '--disable-plugins',
             '--disable-default-apps',
             '--disable-sync',
             '--disable-translate',
             '--hide-scrollbars',
             '--mute-audio',
-            '--no-default-browser-check',
-            '--disable-background-timer-throttling',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-renderer-backgrounding'
+            '--no-default-browser-check'
           ]
         }
       });
