@@ -437,6 +437,105 @@ class DeviceManager {
     }
   }
 
+  async getGroups(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device || device.status !== 'connected') {
+      throw new Error('Device not connected');
+    }
+
+    try {
+      const chats = await device.client.getChats();
+      const groups = chats.filter(chat => chat.isGroup);
+      
+      return groups.map(group => ({
+        id: group.id._serialized,
+        name: group.name,
+        participants: group.participants ? group.participants.map(p => ({
+          id: p.id._serialized,
+          name: p.name || p.pushname || p.number,
+          isAdmin: p.isAdmin || false
+        })) : [],
+        unreadCount: group.unreadCount,
+        lastMessage: group.lastMessage ? {
+          body: group.lastMessage.body,
+          timestamp: group.lastMessage.timestamp,
+          fromMe: group.lastMessage.fromMe,
+          from: group.lastMessage.from
+        } : null,
+        createdAt: group.timestamp
+      }));
+    } catch (error) {
+      throw new Error(`Failed to get groups: ${error.message}`);
+    }
+  }
+
+  async sendGroupMessage(deviceId, groupId, message, mediaFile = null) {
+    const device = this.devices.get(deviceId);
+    if (!device) {
+      throw new Error('Device not found');
+    }
+    
+    if (device.status !== 'connected') {
+      throw new Error(`Device is not connected. Current status: ${device.status}`);
+    }
+
+    if (!device.client) {
+      throw new Error('WhatsApp client is not initialized');
+    }
+
+    try {
+      console.log(`Sending group message from device ${deviceId} to group ${groupId}: ${message || 'media file'}`);
+      
+      let result;
+      
+      if (mediaFile) {
+        // Send media message
+        const { MessageMedia } = require('whatsapp-web.js');
+        const media = MessageMedia.fromFilePath(mediaFile.path);
+        
+        // Add caption if message text is provided
+        if (message) {
+          media.caption = message;
+        }
+        
+        result = await device.client.sendMessage(groupId, media);
+        
+        // Clean up the uploaded file after sending
+        try {
+          await fs.remove(mediaFile.path);
+        } catch (cleanupError) {
+          console.error('Error cleaning up uploaded file:', cleanupError);
+        }
+      } else {
+        // Send text message
+        result = await device.client.sendMessage(groupId, message);
+      }
+      
+      console.log(`Group message sent successfully. Message ID: ${result.id._serialized}`);
+      
+      return {
+        success: true,
+        messageId: result.id._serialized,
+        timestamp: new Date(),
+        groupId: groupId,
+        messageType: mediaFile ? 'media' : 'text'
+      };
+    } catch (error) {
+      console.error(`Failed to send group message from device ${deviceId} to group ${groupId}:`, error);
+      
+      // Clean up uploaded file if there was an error
+      if (mediaFile) {
+        try {
+          await fs.remove(mediaFile.path);
+        } catch (cleanupError) {
+          console.error('Error cleaning up uploaded file after error:', cleanupError);
+        }
+      }
+      
+      throw new Error(`Failed to send group message: ${error.message}`);
+    }
+  }
+
   // API Key management methods
   async createApiKey(deviceId, keyName) {
     try {

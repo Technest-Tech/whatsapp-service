@@ -237,6 +237,105 @@ curl -X GET "https://your-domain.com/api/chats/1234567890@c.us/messages?limit=20
   -H "X-API-Key: wa_your_api_key_here"
 ```
 
+### Get Groups
+**GET** `/groups`
+
+Retrieve all WhatsApp groups from the device.
+
+**Response:**
+```json
+{
+  "success": true,
+  "groups": [
+    {
+      "id": "120363123456789012@g.us",
+      "name": "My Family Group",
+      "participants": [
+        {
+          "id": "1234567890@c.us",
+          "name": "John Doe",
+          "isAdmin": true
+        },
+        {
+          "id": "0987654321@c.us",
+          "name": "Jane Smith",
+          "isAdmin": false
+        }
+      ],
+      "unreadCount": 5,
+      "lastMessage": {
+        "body": "See you tomorrow!",
+        "timestamp": 1705312200,
+        "fromMe": false,
+        "from": "1234567890@c.us"
+      },
+      "createdAt": 1705225800
+    }
+  ]
+}
+```
+
+**cURL Example:**
+```bash
+curl -X GET "https://your-domain.com/api/groups" \
+  -H "X-API-Key: wa_your_api_key_here"
+```
+
+### Send Group Message
+**POST** `/groups/{groupId}/messages`
+
+Send a message to a WhatsApp group. Supports both text messages and media files.
+
+**Path Parameters:**
+- `groupId`: The group ID (e.g., `120363123456789012@g.us`)
+
+**Request Body (multipart/form-data):**
+- `message` (optional): Text message to send
+- `media` (optional): Media file to send (image, document, video, audio)
+
+**Supported Media Types:**
+- Images: JPEG, JPG, PNG, GIF
+- Documents: PDF, DOC, DOCX, TXT
+- Media: MP4, MP3, WAV
+
+**Response:**
+```json
+{
+  "success": true,
+  "result": {
+    "success": true,
+    "messageId": "3EB0C767D26A8B4A5F6A",
+    "timestamp": "2024-01-15T10:30:00.000Z",
+    "groupId": "120363123456789012@g.us",
+    "messageType": "text"
+  }
+}
+```
+
+**cURL Examples:**
+
+Send text message:
+```bash
+curl -X POST "https://your-domain.com/api/groups/120363123456789012@g.us/messages" \
+  -H "X-API-Key: wa_your_api_key_here" \
+  -F "message=Hello everyone!"
+```
+
+Send image with caption:
+```bash
+curl -X POST "https://your-domain.com/api/groups/120363123456789012@g.us/messages" \
+  -H "X-API-Key: wa_your_api_key_here" \
+  -F "message=Check out this photo!" \
+  -F "media=@/path/to/image.jpg"
+```
+
+Send document:
+```bash
+curl -X POST "https://your-domain.com/api/groups/120363123456789012@g.us/messages" \
+  -H "X-API-Key: wa_your_api_key_here" \
+  -F "media=@/path/to/document.pdf"
+```
+
 ## Device Management
 
 ### Create API Key
@@ -375,6 +474,46 @@ async function getMessages(limit = 50) {
   }
 }
 
+// Get groups
+async function getGroups() {
+  try {
+    const response = await fetch(`${API_BASE_URL}/groups`, {
+      headers: {
+        'X-API-Key': API_KEY
+      }
+    });
+    
+    const data = await response.json();
+    return data.groups;
+  } catch (error) {
+    console.error('Error fetching groups:', error);
+    throw error;
+  }
+}
+
+// Send group message
+async function sendGroupMessage(groupId, message, mediaFile = null) {
+  try {
+    const formData = new FormData();
+    if (message) formData.append('message', message);
+    if (mediaFile) formData.append('media', mediaFile);
+    
+    const response = await fetch(`${API_BASE_URL}/groups/${groupId}/messages`, {
+      method: 'POST',
+      headers: {
+        'X-API-Key': API_KEY
+      },
+      body: formData
+    });
+    
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error('Error sending group message:', error);
+    throw error;
+  }
+}
+
 // Check device status
 async function getDeviceStatus() {
   try {
@@ -395,6 +534,8 @@ async function getDeviceStatus() {
 // Usage examples
 sendMessage('1234567890@c.us', 'Hello from my app!');
 getMessages(20).then(messages => console.log(messages));
+getGroups().then(groups => console.log(groups));
+sendGroupMessage('120363123456789012@g.us', 'Hello everyone!');
 getDeviceStatus().then(device => console.log(device.status));
 ```
 
@@ -434,6 +575,28 @@ class WhatsAppAPI:
         url = f"{self.base_url}/device/status"
         response = requests.get(url, headers=self.headers)
         return response.json()
+    
+    def get_groups(self):
+        url = f"{self.base_url}/groups"
+        response = requests.get(url, headers=self.headers)
+        return response.json()
+    
+    def send_group_message(self, group_id, message=None, media_file=None):
+        url = f"{self.base_url}/groups/{group_id}/messages"
+        files = {}
+        data = {}
+        
+        if media_file:
+            files['media'] = open(media_file, 'rb')
+        if message:
+            data['message'] = message
+            
+        response = requests.post(url, headers=self.headers, files=files, data=data)
+        
+        if media_file:
+            files['media'].close()
+            
+        return response.json()
 
 # Usage
 api = WhatsAppAPI('https://your-domain.com/api', 'wa_your_api_key_here')
@@ -445,6 +608,18 @@ print(result)
 # Get recent messages
 messages = api.get_messages(20)
 print(messages)
+
+# Get groups
+groups = api.get_groups()
+print(groups)
+
+# Send group message
+group_result = api.send_group_message('120363123456789012@g.us', 'Hello everyone!')
+print(group_result)
+
+# Send group message with media
+media_result = api.send_group_message('120363123456789012@g.us', 'Check this out!', '/path/to/image.jpg')
+print(media_result)
 
 # Search messages
 search_results = api.search_messages('hello')

@@ -1,6 +1,41 @@
 const express = require('express');
 const router = express.Router();
 const AuthMiddleware = require('../middleware/auth');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs-extra');
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = path.join(__dirname, '../../uploads');
+    fs.ensureDirSync(uploadDir);
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 50 * 1024 * 1024 // 50MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Allow images and documents
+    const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx|txt|mp4|mp3|wav/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only images, documents, and media files are allowed'));
+    }
+  }
+});
 
 module.exports = (deviceManager, messageHandler) => {
   // Create auth middleware instance with database
@@ -274,6 +309,40 @@ module.exports = (deviceManager, messageHandler) => {
       const messages = await deviceManager.getMessages(req.deviceId, req.params.chatId, parseInt(limit));
       res.json({ success: true, messages });
     } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Groups API endpoints
+  router.get('/groups', authMiddleware.authenticateApiKey.bind(authMiddleware), async (req, res) => {
+    try {
+      const groups = await deviceManager.getGroups(req.deviceId);
+      res.json({ success: true, groups });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  router.post('/groups/:groupId/messages', authMiddleware.authenticateApiKey.bind(authMiddleware), upload.single('media'), async (req, res) => {
+    try {
+      const { message } = req.body;
+      const { groupId } = req.params;
+      
+      if (!message && !req.file) {
+        return res.status(400).json({ success: false, error: 'Message text or media file is required' });
+      }
+
+      const result = await deviceManager.sendGroupMessage(req.deviceId, groupId, message, req.file);
+      res.json({ success: true, result });
+    } catch (error) {
+      // Clean up uploaded file if there was an error
+      if (req.file) {
+        try {
+          await fs.remove(req.file.path);
+        } catch (cleanupError) {
+          console.error('Error cleaning up uploaded file:', cleanupError);
+        }
+      }
       res.status(500).json({ success: false, error: error.message });
     }
   });

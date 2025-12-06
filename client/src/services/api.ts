@@ -1,6 +1,8 @@
 import axios from 'axios';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
+// Use environment variable if available, otherwise use current window location
+// This ensures it works in both development and production
+const API_URL = process.env.REACT_APP_API_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5001');
 
 export const api = axios.create({
   baseURL: `${API_URL}/api`,

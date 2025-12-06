@@ -28,9 +28,14 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({ children }) => {
 
   const connect = useCallback(() => {
     if (!socket) {
-      const newSocket = io(process.env.REACT_APP_API_URL || 'http://localhost:5001', {
-        transports: ['websocket'],
+      // Use current window location for Socket.IO to work with any domain
+      const socketUrl = process.env.REACT_APP_API_URL || window.location.origin;
+      const newSocket = io(socketUrl, {
+        transports: ['websocket', 'polling'],
         autoConnect: true,
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionAttempts: 5,
       });
 
       newSocket.on('connect', () => {
