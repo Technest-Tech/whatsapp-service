@@ -94,25 +94,40 @@ app.use((err, req, res, next) => {
 // Ensure data directory exists
 fs.ensureDirSync(path.join(__dirname, '../data'));
 
-// Add periodic health check for connected devices
+// Add periodic health check for connected devices - more frequent and aggressive
 setInterval(async () => {
   try {
     const devices = deviceManager.devices;
     for (const [deviceId, device] of devices) {
-      if (device.status === 'connected' && device.client) {
+      // Check ALL devices, not just "connected" ones
+      // This ensures we reconnect devices that are stuck in "reconnecting" state
+      if (device && device.status !== 'disconnected') {
         try {
-          const state = await device.client.getState();
-          if (state !== 'CONNECTED') {
-            console.log(`Device ${deviceId} state is ${state}, attempting reconnection...`);
+          if (device.client) {
+            const state = await Promise.race([
+              device.client.getState(),
+              new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('State check timeout')), 5000)
+              )
+            ]);
+            
+            if (state !== 'CONNECTED') {
+              console.log(`Device ${deviceId} state is ${state}, attempting reconnection...`);
+              await deviceManager.reconnectDevice(deviceId);
+            }
+          } else if (device.status === 'reconnecting' || device.status === 'connected') {
+            // Device should be connected but client is missing - reconnect
+            console.log(`Device ${deviceId} should be connected but client is missing, reconnecting...`);
             await deviceManager.reconnectDevice(deviceId);
           }
         } catch (error) {
           if (error.message && (
             error.message.includes('Session closed') || 
             error.message.includes('Protocol error') ||
-            error.message.includes('Target closed')
+            error.message.includes('Target closed') ||
+            error.message.includes('timeout')
           )) {
-            console.log(`Device ${deviceId} session closed, reconnecting...`);
+            console.log(`Device ${deviceId} health check failed, reconnecting...`);
             await deviceManager.reconnectDevice(deviceId);
           }
         }
@@ -121,7 +136,7 @@ setInterval(async () => {
   } catch (error) {
     console.error('Error in health check:', error);
   }
-}, 60000); // Check every 60 seconds
+}, 30000); // Check every 30 seconds (more frequent)
 
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);

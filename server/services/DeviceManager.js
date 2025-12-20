@@ -55,34 +55,60 @@ class DeviceManager {
   }
 
   async reconnectDevices() {
+    // Reconnect ALL devices that are not explicitly disconnected
     const devicesToReconnect = Array.from(this.devices.values()).filter(
-      device => device.status === 'connected' || device.status === 'authenticated'
+      device => device.status !== 'disconnected'
     );
     
-    console.log(`Attempting to reconnect ${devicesToReconnect.length} devices...`);
+    console.log(`Attempting to reconnect ${devicesToReconnect.length} devices on startup...`);
     
-    for (const device of devicesToReconnect) {
-      try {
-        await this.initializeDevice(device.id);
-      } catch (error) {
-        console.error(`Failed to reconnect device ${device.id}:`, error);
-        await this.updateDeviceStatus(device.id, 'disconnected');
-      }
+    // Reconnect all devices in parallel (but with small delays to avoid overwhelming)
+    for (let i = 0; i < devicesToReconnect.length; i++) {
+      const device = devicesToReconnect[i];
+      // Stagger reconnections by 2 seconds each
+      setTimeout(async () => {
+        try {
+          await this.reconnectDevice(device.id);
+        } catch (error) {
+          console.error(`Failed to reconnect device ${device.id}:`, error);
+          // Don't mark as disconnected - keep trying
+        }
+      }, i * 2000);
     }
   }
 
   // Add a new method to reconnect a device
-  async reconnectDevice(deviceId) {
+  async reconnectDevice(deviceId, retryCount = 0) {
     const device = this.devices.get(deviceId);
     if (!device) {
       console.error(`Device ${deviceId} not found for reconnection`);
       return;
     }
 
-    // Don't reconnect if already connected or if it was logged out
+    // Don't reconnect if it was explicitly logged out
+    if (device.status === 'disconnected' && !device.client) {
+      // Check database to see if it's still marked as disconnected
+      try {
+        const dbDevice = await this.db.getDevice(deviceId);
+        if (dbDevice && dbDevice.status === 'disconnected') {
+          // Only skip if it was logged out, otherwise try to reconnect
+          console.log(`Device ${deviceId} is marked as disconnected - checking if it should reconnect...`);
+          // If it's been disconnected for a while, try to reconnect anyway (might be a stale state)
+        }
+      } catch (error) {
+        // Continue with reconnection
+      }
+    }
+
+    // Don't reconnect if already connected
     if (device.status === 'connected' && device.client) {
       try {
-        const state = await device.client.getState();
+        const state = await Promise.race([
+          device.client.getState(),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('State check timeout')), 5000)
+          )
+        ]);
         if (state === 'CONNECTED') {
           console.log(`Device ${deviceId} is already connected`);
           return;
@@ -94,7 +120,7 @@ class DeviceManager {
     }
 
     try {
-      console.log(`Attempting to reconnect device ${deviceId}...`);
+      console.log(`Attempting to reconnect device ${deviceId} (attempt ${retryCount + 1})...`);
       
       // Clean up old client if it exists
       if (device.client) {
@@ -108,17 +134,30 @@ class DeviceManager {
 
       // Reinitialize the device
       await this.initializeDevice(deviceId);
-      console.log(`Reconnection attempt completed for device ${deviceId}`);
+      console.log(`Reconnection attempt ${retryCount + 1} completed for device ${deviceId}`);
+      
+      // Reset retry count on success
+      retryCount = 0;
     } catch (error) {
-      console.error(`Failed to reconnect device ${deviceId}:`, error);
-      device.status = 'disconnected';
-      await this.updateDeviceStatus(deviceId, 'disconnected');
+      console.error(`Failed to reconnect device ${deviceId} (attempt ${retryCount + 1}):`, error);
+      
+      // NEVER mark as disconnected - keep status as reconnecting
+      device.status = 'reconnecting';
+      await this.updateDeviceStatus(deviceId, 'reconnecting');
       this.io.emit('device-update', this.getDeviceInfo(device));
       
-      // Retry after 30 seconds
+      // Exponential backoff: 5s, 10s, 20s, 30s, then every 30s
+      const delays = [5000, 10000, 20000, 30000];
+      const delay = retryCount < delays.length 
+        ? delays[retryCount] 
+        : 30000; // Max 30 seconds between retries
+      
+      console.log(`Retrying reconnection for device ${deviceId} in ${delay/1000} seconds...`);
+      
+      // Retry with exponential backoff
       setTimeout(() => {
-        this.reconnectDevice(deviceId);
-      }, 30000);
+        this.reconnectDevice(deviceId, retryCount + 1);
+      }, delay);
     }
   }
 
@@ -293,13 +332,15 @@ class DeviceManager {
       if (error.message && (
         error.message.includes('Session closed') ||
         error.message.includes('Target closed') ||
-        error.message.includes('Protocol error')
+        error.message.includes('Protocol error') ||
+        error.message.includes('Navigation timeout') ||
+        error.message.includes('net::ERR')
       )) {
-        console.log(`Session closed for device ${id}, attempting reconnection...`);
-        // Wait a bit then try to reconnect
+        console.log(`Error detected for device ${id}, attempting reconnection...`);
+        // Immediate reconnection attempt
         setTimeout(() => {
           this.reconnectDevice(id);
-        }, 5000); // Wait 5 seconds before reconnecting
+        }, 2000); // Reduced to 2 seconds
       }
     });
 
@@ -342,22 +383,31 @@ class DeviceManager {
     });
 
     client.on('auth_failure', async (msg) => {
-      device.status = 'auth_failed';
+      // Even auth failure - try to reconnect (might be temporary)
+      console.log(`Auth failure for device ${id}, will attempt reconnection...`);
+      device.status = 'reconnecting';
       
-      await this.updateDeviceStatus(id, 'auth_failed');
+      await this.updateDeviceStatus(id, 'reconnecting');
       
       this.io.to(`device-${id}`).emit('auth-failure', { 
         deviceId: id, 
         message: msg 
       });
       this.io.emit('device-update', this.getDeviceInfo(device));
+      
+      // Attempt to reconnect after a short delay
+      setTimeout(() => {
+        this.reconnectDevice(id);
+      }, 5000);
     });
 
     client.on('disconnected', async (reason) => {
       console.log(`Device ${id} disconnected. Reason: ${reason}`);
       
-      // Only update status if it's a logout, not a crash
+      // ONLY mark as disconnected if it's an explicit LOGOUT
+      // Everything else is temporary and should auto-reconnect
       if (reason === 'LOGOUT') {
+        console.log(`Device ${id} was logged out by user - this is permanent`);
         device.status = 'disconnected';
         device.client = null;
         await this.updateDeviceStatus(id, 'disconnected');
@@ -368,17 +418,17 @@ class DeviceManager {
         });
         this.io.emit('device-update', this.getDeviceInfo(device));
       } else {
-        // For crashes or unexpected disconnections, try to reconnect
-        console.log(`Unexpected disconnection for device ${id}, attempting reconnection...`);
+        // ANY other disconnection reason = temporary, auto-reconnect
+        console.log(`Temporary disconnection for device ${id} (reason: ${reason}), auto-reconnecting...`);
         device.status = 'reconnecting';
         await this.updateDeviceStatus(id, 'reconnecting');
         
         this.io.emit('device-update', this.getDeviceInfo(device));
         
-        // Attempt to reconnect after a delay
+        // Immediate reconnection attempt (no delay for network issues)
         setTimeout(() => {
           this.reconnectDevice(id);
-        }, 5000);
+        }, reason === 'NAVIGATION' || reason === 'TIMEOUT' ? 1000 : 3000);
       }
     });
 
