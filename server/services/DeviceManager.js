@@ -505,12 +505,57 @@ class DeviceManager {
 
   async getChats(deviceId) {
     const device = this.devices.get(deviceId);
-    if (!device || device.status !== 'connected') {
-      throw new Error('Device not connected');
+    if (!device) {
+      throw new Error('Device not found');
+    }
+
+    if (!device.client) {
+      await this.updateDeviceStatus(deviceId, 'disconnected');
+      throw new Error('Device client not initialized');
+    }
+
+    if (device.status !== 'connected') {
+      throw new Error(`Device not connected. Current status: ${device.status}`);
+    }
+
+    // Verify client is actually connected before making the call
+    try {
+      const state = await Promise.race([
+        device.client.getState(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('State check timeout')), 5000)
+        )
+      ]);
+      
+      if (state !== 'CONNECTED') {
+        console.log(`Device ${deviceId} state is ${state}, updating status...`);
+        device.status = 'disconnected';
+        await this.updateDeviceStatus(deviceId, 'disconnected');
+        this.io.emit('device-update', this.getDeviceInfo(device));
+        throw new Error(`Device is not connected. State: ${state}`);
+      }
+    } catch (error) {
+      if (error.message.includes('timeout') || error.message.includes('Session closed') || 
+          error.message.includes('Protocol error') || error.message.includes('Target closed')) {
+        console.error(`Device ${deviceId} state check failed:`, error.message);
+        device.status = 'disconnected';
+        device.client = null;
+        await this.updateDeviceStatus(deviceId, 'disconnected');
+        this.io.emit('device-update', this.getDeviceInfo(device));
+        throw new Error('Device session is closed');
+      }
+      throw error;
     }
 
     try {
-      const chats = await device.client.getChats();
+      // Add timeout to getChats call
+      const chats = await Promise.race([
+        device.client.getChats(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('getChats timeout after 25 seconds')), 25000)
+        )
+      ]);
+      
       return chats.map(chat => ({
         id: chat.id._serialized,
         name: chat.name,
@@ -527,18 +572,21 @@ class DeviceManager {
       if (error.message && (
         error.message.includes('Session closed') || 
         error.message.includes('Protocol error') ||
-        error.message.includes('Target closed')
+        error.message.includes('Target closed') ||
+        error.message.includes('timeout')
       )) {
-        console.error(`Session closed for device ${deviceId}, updating status and reconnecting...`);
-        device.status = 'reconnecting';
+        console.error(`Session closed or timeout for device ${deviceId}, updating status...`);
+        device.status = 'disconnected';
+        if (device.client) {
+          try {
+            await device.client.destroy();
+          } catch (e) {
+            // Ignore destroy errors
+          }
+        }
         device.client = null;
-        await this.updateDeviceStatus(deviceId, 'reconnecting');
+        await this.updateDeviceStatus(deviceId, 'disconnected');
         this.io.emit('device-update', this.getDeviceInfo(device));
-        
-        // Trigger reconnection
-        setTimeout(() => {
-          this.reconnectDevice(deviceId);
-        }, 2000);
       }
       throw new Error(`Failed to get chats: ${error.message}`);
     }
@@ -546,13 +594,63 @@ class DeviceManager {
 
   async getMessages(deviceId, chatId, limit = 50) {
     const device = this.devices.get(deviceId);
-    if (!device || device.status !== 'connected') {
-      throw new Error('Device not connected');
+    if (!device) {
+      throw new Error('Device not found');
+    }
+
+    if (!device.client) {
+      await this.updateDeviceStatus(deviceId, 'disconnected');
+      throw new Error('Device client not initialized');
+    }
+
+    if (device.status !== 'connected') {
+      throw new Error(`Device not connected. Current status: ${device.status}`);
+    }
+
+    // Verify client is actually connected before making the call
+    try {
+      const state = await Promise.race([
+        device.client.getState(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('State check timeout')), 5000)
+        )
+      ]);
+      
+      if (state !== 'CONNECTED') {
+        console.log(`Device ${deviceId} state is ${state}, updating status...`);
+        device.status = 'disconnected';
+        await this.updateDeviceStatus(deviceId, 'disconnected');
+        this.io.emit('device-update', this.getDeviceInfo(device));
+        throw new Error(`Device is not connected. State: ${state}`);
+      }
+    } catch (error) {
+      if (error.message.includes('timeout') || error.message.includes('Session closed') || 
+          error.message.includes('Protocol error') || error.message.includes('Target closed')) {
+        console.error(`Device ${deviceId} state check failed:`, error.message);
+        device.status = 'disconnected';
+        device.client = null;
+        await this.updateDeviceStatus(deviceId, 'disconnected');
+        this.io.emit('device-update', this.getDeviceInfo(device));
+        throw new Error('Device session is closed');
+      }
+      throw error;
     }
 
     try {
-      const chat = await device.client.getChatById(chatId);
-      const messages = await chat.fetchMessages({ limit });
+      // Add timeout to getChatById and fetchMessages calls
+      const chat = await Promise.race([
+        device.client.getChatById(chatId),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('getChatById timeout')), 10000)
+        )
+      ]);
+      
+      const messages = await Promise.race([
+        chat.fetchMessages({ limit }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('fetchMessages timeout')), 20000)
+        )
+      ]);
       
       return messages.map(message => ({
         id: message.id._serialized,
@@ -565,22 +663,25 @@ class DeviceManager {
         isForwarded: message.isForwarded
       }));
     } catch (error) {
-      // If session is closed, update device status and trigger reconnection
+      // If session is closed, update device status
       if (error.message && (
         error.message.includes('Session closed') || 
         error.message.includes('Protocol error') ||
-        error.message.includes('Target closed')
+        error.message.includes('Target closed') ||
+        error.message.includes('timeout')
       )) {
-        console.error(`Session closed for device ${deviceId}, updating status and reconnecting...`);
-        device.status = 'reconnecting';
+        console.error(`Session closed or timeout for device ${deviceId}, updating status...`);
+        device.status = 'disconnected';
+        if (device.client) {
+          try {
+            await device.client.destroy();
+          } catch (e) {
+            // Ignore destroy errors
+          }
+        }
         device.client = null;
-        await this.updateDeviceStatus(deviceId, 'reconnecting');
+        await this.updateDeviceStatus(deviceId, 'disconnected');
         this.io.emit('device-update', this.getDeviceInfo(device));
-        
-        // Trigger reconnection
-        setTimeout(() => {
-          this.reconnectDevice(deviceId);
-        }, 2000);
       }
       throw new Error(`Failed to get messages: ${error.message}`);
     }
