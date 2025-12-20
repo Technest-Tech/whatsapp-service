@@ -21,6 +21,79 @@ class DeviceManager {
     fs.ensureDirSync(this.dataDir);
   }
 
+  // Helper method to classify errors as network errors vs session errors
+  isNetworkError(error) {
+    if (!error || !error.message) return false;
+    const message = error.message.toLowerCase();
+    
+    // Network-related errors that should NOT destroy the client
+    const networkErrorPatterns = [
+      'net::err',
+      'navigation timeout',
+      'timeout',
+      'network',
+      'econnreset',
+      'econnrefused',
+      'enotfound',
+      'etimedout',
+      'socket hang up',
+      'connection lost'
+    ];
+    
+    // Session-related errors that require client recreation
+    const sessionErrorPatterns = [
+      'session closed',
+      'protocol error',
+      'target closed',
+      'browser closed',
+      'page closed'
+    ];
+    
+    // Check for session errors first (higher priority)
+    for (const pattern of sessionErrorPatterns) {
+      if (message.includes(pattern)) {
+        return false; // This is a session error, not a network error
+      }
+    }
+    
+    // Check for network errors
+    for (const pattern of networkErrorPatterns) {
+      if (message.includes(pattern)) {
+        return true; // This is a network error
+      }
+    }
+    
+    return false; // Unknown error, treat as session error to be safe
+  }
+
+  // Helper method to check if device has valid session data
+  async hasValidSession(deviceId) {
+    try {
+      const deviceDataDir = path.join(this.dataDir, deviceId);
+      if (!await fs.pathExists(deviceDataDir)) {
+        return false;
+      }
+      
+      // Check if session directory has authentication files
+      const sessionDir = path.join(deviceDataDir, `session-${deviceId}`);
+      if (await fs.pathExists(sessionDir)) {
+        const files = await fs.readdir(sessionDir);
+        // Look for authentication-related files
+        const hasAuthFiles = files.some(file => 
+          file.includes('Default') || 
+          file.includes('Local Storage') ||
+          file.includes('IndexedDB')
+        );
+        return hasAuthFiles;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error(`Error checking session for device ${deviceId}:`, error);
+      return false;
+    }
+  }
+
   async loadDevices() {
     try {
       // Wait for database to be ready
@@ -78,7 +151,7 @@ class DeviceManager {
   }
 
   // Add a new method to reconnect a device
-  async reconnectDevice(deviceId, retryCount = 0) {
+  async reconnectDevice(deviceId, retryCount = 0, preserveClient = false) {
     const device = this.devices.get(deviceId);
     if (!device) {
       console.error(`Device ${deviceId} not found for reconnection`);
@@ -100,6 +173,65 @@ class DeviceManager {
       }
     }
 
+    // If client exists and we're trying to preserve it (network error), check state multiple times
+    if (device.client && preserveClient) {
+      console.log(`Device ${deviceId} has existing client, checking if it can recover...`);
+      
+      // Try checking state multiple times with delays (network might be stabilizing)
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1))); // 2s, 4s, 6s
+          
+          const state = await Promise.race([
+            device.client.getState(),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('State check timeout')), 5000)
+            )
+          ]);
+          
+          if (state === 'CONNECTED') {
+            console.log(`Device ${deviceId} client recovered without recreation`);
+            device.status = 'connected';
+            await this.updateDeviceStatus(deviceId, 'connected');
+            this.io.emit('device-update', this.getDeviceInfo(device));
+            return;
+          }
+        } catch (error) {
+          // Continue to next attempt
+          if (attempt === 2) {
+            console.log(`Device ${deviceId} client didn't recover after ${attempt + 1} attempts`);
+          }
+        }
+      }
+      
+      // Client didn't recover, but check if it's a network issue
+      // If we have valid session data, try one more time before destroying
+      const hasSession = await this.hasValidSession(deviceId);
+      if (hasSession) {
+        console.log(`Device ${deviceId} has valid session, waiting a bit more before destroying client...`);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        try {
+          const state = await Promise.race([
+            device.client.getState(),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('State check timeout')), 5000)
+            )
+          ]);
+          
+          if (state === 'CONNECTED') {
+            console.log(`Device ${deviceId} client recovered after extended wait`);
+            device.status = 'connected';
+            await this.updateDeviceStatus(deviceId, 'connected');
+            this.io.emit('device-update', this.getDeviceInfo(device));
+            return;
+          }
+        } catch (error) {
+          // Proceed with client recreation
+        }
+      }
+    }
+
     // Don't reconnect if already connected
     if (device.status === 'connected' && device.client) {
       try {
@@ -115,15 +247,25 @@ class DeviceManager {
         }
       } catch (error) {
         // Client exists but not connected, proceed with reconnection
-        console.log(`Device ${deviceId} client exists but not connected, reinitializing...`);
+        console.log(`Device ${deviceId} client exists but not connected, will reinitialize...`);
       }
     }
 
     try {
       console.log(`Attempting to reconnect device ${deviceId} (attempt ${retryCount + 1})...`);
       
-      // Clean up old client if it exists
-      if (device.client) {
+      // Only destroy client if we're not trying to preserve it
+      // or if we've confirmed it can't recover
+      if (device.client && !preserveClient) {
+        try {
+          await device.client.destroy();
+        } catch (error) {
+          console.log(`Error destroying old client for ${deviceId}:`, error.message);
+        }
+        device.client = null;
+      } else if (device.client && preserveClient) {
+        // We tried to preserve but it didn't work, now destroy it
+        console.log(`Device ${deviceId} client couldn't be preserved, destroying...`);
         try {
           await device.client.destroy();
         } catch (error) {
@@ -156,7 +298,7 @@ class DeviceManager {
       
       // Retry with exponential backoff
       setTimeout(() => {
-        this.reconnectDevice(deviceId, retryCount + 1);
+        this.reconnectDevice(deviceId, retryCount + 1, false);
       }, delay);
     }
   }
@@ -328,34 +470,101 @@ class DeviceManager {
     // Add error handler to catch browser crashes
     client.on('error', async (error) => {
       console.error(`Client error for device ${id}:`, error);
-      // Don't immediately disconnect on error, try to recover
-      if (error.message && (
-        error.message.includes('Session closed') ||
-        error.message.includes('Target closed') ||
-        error.message.includes('Protocol error') ||
-        error.message.includes('Navigation timeout') ||
-        error.message.includes('net::ERR')
-      )) {
-        console.log(`Error detected for device ${id}, attempting reconnection...`);
-        // Immediate reconnection attempt
+      
+      // Classify the error
+      const isNetworkErr = this.isNetworkError(error);
+      
+      if (isNetworkErr) {
+        // Network error - don't destroy client, just wait and let it recover
+        console.log(`Network error detected for device ${id}, waiting for recovery...`);
+        device.status = 'reconnecting';
+        await this.updateDeviceStatus(id, 'reconnecting');
+        this.io.emit('device-update', this.getDeviceInfo(device));
+        
+        // Wait a bit and check if client recovers on its own
+        setTimeout(async () => {
+          try {
+            if (device.client) {
+              const state = await Promise.race([
+                device.client.getState(),
+                new Promise((_, reject) => 
+                  setTimeout(() => reject(new Error('State check timeout')), 5000)
+                )
+              ]);
+              
+              if (state === 'CONNECTED') {
+                console.log(`Device ${id} recovered from network error`);
+                device.status = 'connected';
+                await this.updateDeviceStatus(id, 'connected');
+                this.io.emit('device-update', this.getDeviceInfo(device));
+                return;
+              }
+            }
+          } catch (e) {
+            // Client didn't recover, proceed with reconnection
+          }
+          
+          // If client didn't recover, try reconnecting
+          console.log(`Device ${id} didn't recover, attempting reconnection...`);
+          this.reconnectDevice(id, 0, true); // Pass flag to preserve client if possible
+        }, 5000); // Wait 5 seconds for network to stabilize
+      } else {
+        // Session error - need to recreate client
+        console.log(`Session error detected for device ${id}, will recreate client...`);
         setTimeout(() => {
           this.reconnectDevice(id);
-        }, 2000); // Reduced to 2 seconds
+        }, 2000);
       }
     });
 
     client.on('qr', async (qr) => {
       try {
-        const qrCodeDataURL = await QRCode.toDataURL(qr);
-        device.qrCode = qrCodeDataURL;
-        device.status = 'qr_ready';
+        // Check if device was previously connected (has valid session)
+        const wasConnected = await this.hasValidSession(id);
+        const previousStatus = device.status;
         
-        this.io.to(`device-${id}`).emit('qr-code', {
-          deviceId: id,
-          qrCode: qrCodeDataURL
-        });
-        
-        this.io.emit('device-update', this.getDeviceInfo(device));
+        // If device was connected and we're reconnecting, don't show QR immediately
+        // Wait a bit to see if session restores automatically
+        if (wasConnected && (previousStatus === 'reconnecting' || previousStatus === 'connected')) {
+          console.log(`Device ${id} QR code received but was previously connected - waiting for session restore...`);
+          
+          // Wait 3 seconds to see if 'ready' event fires (session restored)
+          setTimeout(async () => {
+            // Check if device became ready
+            if (device.status === 'connected' || device.status === 'ready') {
+              console.log(`Device ${id} session restored, QR not needed`);
+              return;
+            }
+            
+            // Session didn't restore, show QR but keep status as reconnecting
+            console.log(`Device ${id} session didn't restore, showing QR code`);
+            const qrCodeDataURL = await QRCode.toDataURL(qr);
+            device.qrCode = qrCodeDataURL;
+            // Keep status as reconnecting, not qr_ready
+            if (device.status !== 'connected') {
+              device.status = 'reconnecting';
+            }
+            
+            this.io.to(`device-${id}`).emit('qr-code', {
+              deviceId: id,
+              qrCode: qrCodeDataURL
+            });
+            
+            this.io.emit('device-update', this.getDeviceInfo(device));
+          }, 3000);
+        } else {
+          // Device was never connected or session is invalid - show QR immediately
+          const qrCodeDataURL = await QRCode.toDataURL(qr);
+          device.qrCode = qrCodeDataURL;
+          device.status = 'qr_ready';
+          
+          this.io.to(`device-${id}`).emit('qr-code', {
+            deviceId: id,
+            qrCode: qrCodeDataURL
+          });
+          
+          this.io.emit('device-update', this.getDeviceInfo(device));
+        }
       } catch (error) {
         console.error('Error generating QR code:', error);
       }
