@@ -523,7 +523,7 @@ class DeviceManager {
       const state = await Promise.race([
         device.client.getState(),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('State check timeout')), 5000)
+          setTimeout(() => reject(new Error('State check timeout')), 10000)
         )
       ]);
       
@@ -535,24 +535,32 @@ class DeviceManager {
         throw new Error(`Device is not connected. State: ${state}`);
       }
     } catch (error) {
-      if (error.message.includes('timeout') || error.message.includes('Session closed') || 
-          error.message.includes('Protocol error') || error.message.includes('Target closed')) {
+      // Only mark as disconnected on actual session closure, not on timeout
+      if (error.message.includes('Session closed') || 
+          error.message.includes('Protocol error') || 
+          error.message.includes('Target closed')) {
         console.error(`Device ${deviceId} state check failed:`, error.message);
         device.status = 'disconnected';
         device.client = null;
         await this.updateDeviceStatus(deviceId, 'disconnected');
         this.io.emit('device-update', this.getDeviceInfo(device));
         throw new Error('Device session is closed');
+      } else if (error.message.includes('timeout')) {
+        // State check timeout - skip the check and try getChats anyway
+        // The device might still be connected, just slow to respond
+        console.warn(`State check timeout for device ${deviceId} - proceeding with getChats anyway`);
+      } else {
+        throw error;
       }
-      throw error;
     }
 
     try {
-      // Add timeout to getChats call
+      // Add timeout to getChats call - but don't destroy client on timeout
+      // WhatsApp Web can be slow, especially on first load
       const chats = await Promise.race([
         device.client.getChats(),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('getChats timeout after 25 seconds')), 25000)
+          setTimeout(() => reject(new Error('getChats timeout after 45 seconds')), 45000)
         )
       ]);
       
@@ -568,14 +576,15 @@ class DeviceManager {
         } : null
       }));
     } catch (error) {
-      // If session is closed, update device status and trigger reconnection
+      // Only mark as disconnected on actual session closure, not on timeout
+      // Timeout just means the operation is slow, not that the device is disconnected
       if (error.message && (
         error.message.includes('Session closed') || 
         error.message.includes('Protocol error') ||
-        error.message.includes('Target closed') ||
-        error.message.includes('timeout')
+        error.message.includes('Target closed')
       )) {
-        console.error(`Session closed or timeout for device ${deviceId}, updating status...`);
+        // Actual session closure - mark as disconnected
+        console.error(`Session closed for device ${deviceId}, updating status...`);
         device.status = 'disconnected';
         if (device.client) {
           try {
@@ -587,8 +596,16 @@ class DeviceManager {
         device.client = null;
         await this.updateDeviceStatus(deviceId, 'disconnected');
         this.io.emit('device-update', this.getDeviceInfo(device));
+        throw new Error(`Failed to get chats: ${error.message}`);
+      } else if (error.message && error.message.includes('timeout')) {
+        // Timeout - don't mark as disconnected, just throw the error
+        // The device might still be connected, just slow
+        console.warn(`getChats timeout for device ${deviceId} - operation is slow but device may still be connected`);
+        throw new Error(`Failed to get chats: Operation timed out. The device may still be connected but the operation is taking longer than expected.`);
+      } else {
+        // Other errors - just throw them
+        throw new Error(`Failed to get chats: ${error.message}`);
       }
-      throw new Error(`Failed to get chats: ${error.message}`);
     }
   }
 
@@ -612,7 +629,7 @@ class DeviceManager {
       const state = await Promise.race([
         device.client.getState(),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('State check timeout')), 5000)
+          setTimeout(() => reject(new Error('State check timeout')), 10000)
         )
       ]);
       
@@ -624,16 +641,23 @@ class DeviceManager {
         throw new Error(`Device is not connected. State: ${state}`);
       }
     } catch (error) {
-      if (error.message.includes('timeout') || error.message.includes('Session closed') || 
-          error.message.includes('Protocol error') || error.message.includes('Target closed')) {
+      // Only mark as disconnected on actual session closure, not on timeout
+      if (error.message.includes('Session closed') || 
+          error.message.includes('Protocol error') || 
+          error.message.includes('Target closed')) {
         console.error(`Device ${deviceId} state check failed:`, error.message);
         device.status = 'disconnected';
         device.client = null;
         await this.updateDeviceStatus(deviceId, 'disconnected');
         this.io.emit('device-update', this.getDeviceInfo(device));
         throw new Error('Device session is closed');
+      } else if (error.message.includes('timeout')) {
+        // State check timeout - skip the check and try getMessages anyway
+        // The device might still be connected, just slow to respond
+        console.warn(`State check timeout for device ${deviceId} - proceeding with getMessages anyway`);
+      } else {
+        throw error;
       }
-      throw error;
     }
 
     try {
@@ -641,14 +665,14 @@ class DeviceManager {
       const chat = await Promise.race([
         device.client.getChatById(chatId),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('getChatById timeout')), 10000)
+          setTimeout(() => reject(new Error('getChatById timeout')), 15000)
         )
       ]);
       
       const messages = await Promise.race([
         chat.fetchMessages({ limit }),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('fetchMessages timeout')), 20000)
+          setTimeout(() => reject(new Error('fetchMessages timeout')), 30000)
         )
       ]);
       
@@ -663,14 +687,14 @@ class DeviceManager {
         isForwarded: message.isForwarded
       }));
     } catch (error) {
-      // If session is closed, update device status
+      // Only mark as disconnected on actual session closure, not on timeout
       if (error.message && (
         error.message.includes('Session closed') || 
         error.message.includes('Protocol error') ||
-        error.message.includes('Target closed') ||
-        error.message.includes('timeout')
+        error.message.includes('Target closed')
       )) {
-        console.error(`Session closed or timeout for device ${deviceId}, updating status...`);
+        // Actual session closure - mark as disconnected
+        console.error(`Session closed for device ${deviceId}, updating status...`);
         device.status = 'disconnected';
         if (device.client) {
           try {
@@ -682,8 +706,16 @@ class DeviceManager {
         device.client = null;
         await this.updateDeviceStatus(deviceId, 'disconnected');
         this.io.emit('device-update', this.getDeviceInfo(device));
+        throw new Error(`Failed to get messages: ${error.message}`);
+      } else if (error.message && error.message.includes('timeout')) {
+        // Timeout - don't mark as disconnected, just throw the error
+        // The device might still be connected, just slow
+        console.warn(`getMessages timeout for device ${deviceId} - operation is slow but device may still be connected`);
+        throw new Error(`Failed to get messages: Operation timed out. The device may still be connected but the operation is taking longer than expected.`);
+      } else {
+        // Other errors - just throw them
+        throw new Error(`Failed to get messages: ${error.message}`);
       }
-      throw new Error(`Failed to get messages: ${error.message}`);
     }
   }
 
