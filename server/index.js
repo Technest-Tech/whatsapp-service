@@ -94,6 +94,9 @@ app.use((err, req, res, next) => {
 // Ensure data directory exists
 fs.ensureDirSync(path.join(__dirname, '../data'));
 
+// Track consecutive null states to avoid false positives
+const deviceNullStateCount = new Map();
+
 // Add periodic health check for connected devices - more frequent and aggressive
 setInterval(async () => {
   try {
@@ -111,24 +114,56 @@ setInterval(async () => {
               )
             ]);
             
-            if (state !== 'CONNECTED') {
+            // Handle null state - don't immediately reconnect
+            // null can mean client is initializing or temporarily unavailable
+            if (state === null) {
+              const nullCount = (deviceNullStateCount.get(deviceId) || 0) + 1;
+              deviceNullStateCount.set(deviceId, nullCount);
+              
+              // Only reconnect if we've seen null state 3 times in a row (90 seconds)
+              // This prevents false positives from temporary issues
+              if (nullCount >= 3) {
+                console.log(`Device ${deviceId} state is null for ${nullCount} consecutive checks, attempting reconnection...`);
+                deviceNullStateCount.delete(deviceId);
+                await deviceManager.reconnectDevice(deviceId, 0, true); // Preserve client if possible
+              } else {
+                console.log(`Device ${deviceId} state is null (count: ${nullCount}), waiting before reconnecting...`);
+              }
+            } else if (state === 'CONNECTED') {
+              // Device is connected - reset null count
+              deviceNullStateCount.delete(deviceId);
+            } else {
+              // Explicit disconnected state (UNPAIRED, UNLAUNCHED, etc.) - reconnect
               console.log(`Device ${deviceId} state is ${state}, attempting reconnection...`);
+              deviceNullStateCount.delete(deviceId);
               await deviceManager.reconnectDevice(deviceId);
             }
           } else if (device.status === 'reconnecting' || device.status === 'connected') {
             // Device should be connected but client is missing - reconnect
             console.log(`Device ${deviceId} should be connected but client is missing, reconnecting...`);
+            deviceNullStateCount.delete(deviceId);
             await deviceManager.reconnectDevice(deviceId);
           }
         } catch (error) {
+          // Only reconnect on actual session errors, not timeouts
           if (error.message && (
             error.message.includes('Session closed') || 
             error.message.includes('Protocol error') ||
-            error.message.includes('Target closed') ||
-            error.message.includes('timeout')
+            error.message.includes('Target closed')
           )) {
-            console.log(`Device ${deviceId} health check failed, reconnecting...`);
+            console.log(`Device ${deviceId} health check failed with session error, reconnecting...`);
+            deviceNullStateCount.delete(deviceId);
             await deviceManager.reconnectDevice(deviceId);
+          } else if (error.message && error.message.includes('timeout')) {
+            // Timeout - increment null count but don't reconnect immediately
+            const nullCount = (deviceNullStateCount.get(deviceId) || 0) + 1;
+            deviceNullStateCount.set(deviceId, nullCount);
+            
+            if (nullCount >= 3) {
+              console.log(`Device ${deviceId} state check timed out ${nullCount} times, attempting reconnection...`);
+              deviceNullStateCount.delete(deviceId);
+              await deviceManager.reconnectDevice(deviceId, 0, true);
+            }
           }
         }
       }
