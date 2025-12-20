@@ -94,6 +94,109 @@ class DeviceManager {
     }
   }
 
+  // Helper method to clean up Chrome lock files that prevent browser startup
+  async cleanupChromeLockFiles(deviceId) {
+    try {
+      const deviceDataDir = path.join(this.dataDir, deviceId);
+      const sessionDir = path.join(deviceDataDir, `session-${deviceId}`);
+      
+      if (!await fs.pathExists(sessionDir)) {
+        return;
+      }
+
+      // List of lock files that Chrome creates
+      const lockFiles = [
+        'SingletonLock',
+        'SingletonSocket',
+        'SingletonCookie',
+        'lockfile',
+        '.org.chromium.Chromium.*',
+      ];
+
+      // Also check in Default subdirectory
+      const defaultDir = path.join(sessionDir, 'Default');
+      
+      // Clean up lock files in session directory
+      if (await fs.pathExists(sessionDir)) {
+        const files = await fs.readdir(sessionDir);
+        for (const file of files) {
+          // Check if it's a lock file
+          if (lockFiles.some(lockPattern => 
+            file === lockPattern || 
+            file.startsWith(lockPattern.replace('*', '')) ||
+            file.includes('Singleton') ||
+            file === 'lockfile'
+          )) {
+            const lockFilePath = path.join(sessionDir, file);
+            try {
+              await fs.remove(lockFilePath);
+              console.log(`Cleaned up lock file: ${lockFilePath}`);
+            } catch (error) {
+              // Ignore errors if file doesn't exist or is locked
+              console.log(`Could not remove lock file ${lockFilePath}:`, error.message);
+            }
+          }
+        }
+      }
+
+      // Clean up lock files in Default directory
+      if (await fs.pathExists(defaultDir)) {
+        const defaultFiles = await fs.readdir(defaultDir);
+        for (const file of defaultFiles) {
+          if (lockFiles.some(lockPattern => 
+            file === lockPattern || 
+            file.startsWith(lockPattern.replace('*', '')) ||
+            file.includes('Singleton') ||
+            file === 'lockfile'
+          )) {
+            const lockFilePath = path.join(defaultDir, file);
+            try {
+              await fs.remove(lockFilePath);
+              console.log(`Cleaned up lock file: ${lockFilePath}`);
+            } catch (error) {
+              console.log(`Could not remove lock file ${lockFilePath}:`, error.message);
+            }
+          }
+        }
+      }
+
+      // Also try to find and remove any process lock files
+      try {
+        // Look for lock files recursively
+        const walkDir = async (dir) => {
+          if (!await fs.pathExists(dir)) return;
+          
+          const entries = await fs.readdir(dir);
+          for (const entry of entries) {
+            const fullPath = path.join(dir, entry);
+            const stat = await fs.stat(fullPath);
+            
+            if (stat.isDirectory()) {
+              await walkDir(fullPath);
+            } else if (entry.includes('Singleton') || entry === 'lockfile' || entry === 'SingletonLock') {
+              try {
+                await fs.remove(fullPath);
+                console.log(`Cleaned up lock file: ${fullPath}`);
+              } catch (error) {
+                // Ignore errors
+              }
+            }
+          }
+        };
+        
+        await walkDir(sessionDir);
+      } catch (error) {
+        // Ignore errors in recursive cleanup
+        console.log(`Error in recursive lock cleanup:`, error.message);
+      }
+
+      console.log(`Lock file cleanup completed for device ${deviceId}`);
+    } catch (error) {
+      console.error(`Error cleaning up lock files for device ${deviceId}:`, error);
+      // Don't throw - continue even if cleanup fails
+    }
+  }
+
   async loadDevices() {
     try {
       // Wait for database to be ready
@@ -333,6 +436,10 @@ class DeviceManager {
     // DON'T clean up session data - we want to keep it for persistence
     // Only ensure the directory exists
     await fs.ensureDir(deviceDataDir);
+
+    // Clean up Chrome lock files that might prevent browser startup
+    // This is especially important after crashes or unexpected shutdowns
+    await this.cleanupChromeLockFiles(deviceId);
 
     const client = new Client({
       authStrategy: new LocalAuth({
