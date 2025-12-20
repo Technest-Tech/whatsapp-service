@@ -94,6 +94,35 @@ app.use((err, req, res, next) => {
 // Ensure data directory exists
 fs.ensureDirSync(path.join(__dirname, '../data'));
 
+// Add periodic health check for connected devices
+setInterval(async () => {
+  try {
+    const devices = deviceManager.devices;
+    for (const [deviceId, device] of devices) {
+      if (device.status === 'connected' && device.client) {
+        try {
+          const state = await device.client.getState();
+          if (state !== 'CONNECTED') {
+            console.log(`Device ${deviceId} state is ${state}, attempting reconnection...`);
+            await deviceManager.reconnectDevice(deviceId);
+          }
+        } catch (error) {
+          if (error.message && (
+            error.message.includes('Session closed') || 
+            error.message.includes('Protocol error') ||
+            error.message.includes('Target closed')
+          )) {
+            console.log(`Device ${deviceId} session closed, reconnecting...`);
+            await deviceManager.reconnectDevice(deviceId);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error in health check:', error);
+  }
+}, 60000); // Check every 60 seconds
+
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📱 WhatsApp Web Dashboard Backend Ready`);

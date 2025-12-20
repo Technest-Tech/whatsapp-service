@@ -71,6 +71,57 @@ class DeviceManager {
     }
   }
 
+  // Add a new method to reconnect a device
+  async reconnectDevice(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device) {
+      console.error(`Device ${deviceId} not found for reconnection`);
+      return;
+    }
+
+    // Don't reconnect if already connected or if it was logged out
+    if (device.status === 'connected' && device.client) {
+      try {
+        const state = await device.client.getState();
+        if (state === 'CONNECTED') {
+          console.log(`Device ${deviceId} is already connected`);
+          return;
+        }
+      } catch (error) {
+        // Client exists but not connected, proceed with reconnection
+        console.log(`Device ${deviceId} client exists but not connected, reinitializing...`);
+      }
+    }
+
+    try {
+      console.log(`Attempting to reconnect device ${deviceId}...`);
+      
+      // Clean up old client if it exists
+      if (device.client) {
+        try {
+          await device.client.destroy();
+        } catch (error) {
+          console.log(`Error destroying old client for ${deviceId}:`, error.message);
+        }
+        device.client = null;
+      }
+
+      // Reinitialize the device
+      await this.initializeDevice(deviceId);
+      console.log(`Reconnection attempt completed for device ${deviceId}`);
+    } catch (error) {
+      console.error(`Failed to reconnect device ${deviceId}:`, error);
+      device.status = 'disconnected';
+      await this.updateDeviceStatus(deviceId, 'disconnected');
+      this.io.emit('device-update', this.getDeviceInfo(device));
+      
+      // Retry after 30 seconds
+      setTimeout(() => {
+        this.reconnectDevice(deviceId);
+      }, 30000);
+    }
+  }
+
   async initializeDevice(deviceId) {
     const device = this.devices.get(deviceId);
     if (!device) {
@@ -78,16 +129,28 @@ class DeviceManager {
     }
 
     if (device.client) {
-      return device; // Already initialized
+      // Check if client is still alive
+      try {
+        const state = await device.client.getState();
+        if (state === 'CONNECTED') {
+          return device; // Already connected
+        }
+      } catch (error) {
+        // Client exists but not working, destroy it
+        console.log(`Existing client for ${deviceId} is not working, recreating...`);
+        try {
+          await device.client.destroy();
+        } catch (e) {
+          // Ignore destroy errors
+        }
+        device.client = null;
+      }
     }
 
     const deviceDataDir = path.join(this.dataDir, deviceId);
     
-    // Clean up any existing session data to prevent lock issues
-    if (await fs.pathExists(deviceDataDir)) {
-      await fs.remove(deviceDataDir);
-    }
-    
+    // DON'T clean up session data - we want to keep it for persistence
+    // Only ensure the directory exists
     await fs.ensureDir(deviceDataDir);
 
     const client = new Client({
@@ -110,8 +173,26 @@ class DeviceManager {
           '--disable-translate',
           '--hide-scrollbars',
           '--mute-audio',
-          '--no-default-browser-check'
-        ]
+          '--no-default-browser-check',
+          // Add stability flags
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding',
+          '--disable-features=TranslateUI',
+          '--disable-ipc-flooding-protection',
+          // Memory management
+          '--max-old-space-size=512',
+          '--js-flags=--max-old-space-size=512'
+        ],
+        // Keep browser alive
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        handleSIGHUP: false
+      },
+      // Add webhook options for better connection management
+      webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2413.51.html',
       }
     });
 
@@ -126,7 +207,7 @@ class DeviceManager {
       await Promise.race([
         client.initialize(),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Initialization timeout')), 30000) // 30 seconds
+          setTimeout(() => reject(new Error('Initialization timeout')), 60000) // Increased to 60 seconds
         )
       ]);
     } catch (error) {
@@ -205,6 +286,23 @@ class DeviceManager {
   setupClientEvents(device) {
     const { client, id } = device;
 
+    // Add error handler to catch browser crashes
+    client.on('error', async (error) => {
+      console.error(`Client error for device ${id}:`, error);
+      // Don't immediately disconnect on error, try to recover
+      if (error.message && (
+        error.message.includes('Session closed') ||
+        error.message.includes('Target closed') ||
+        error.message.includes('Protocol error')
+      )) {
+        console.log(`Session closed for device ${id}, attempting reconnection...`);
+        // Wait a bit then try to reconnect
+        setTimeout(() => {
+          this.reconnectDevice(id);
+        }, 5000); // Wait 5 seconds before reconnecting
+      }
+    });
+
     client.on('qr', async (qr) => {
       try {
         const qrCodeDataURL = await QRCode.toDataURL(qr);
@@ -256,15 +354,32 @@ class DeviceManager {
     });
 
     client.on('disconnected', async (reason) => {
-      device.status = 'disconnected';
+      console.log(`Device ${id} disconnected. Reason: ${reason}`);
       
-      await this.updateDeviceStatus(id, 'disconnected');
-      
-      this.io.to(`device-${id}`).emit('device-disconnected', { 
-        deviceId: id, 
-        reason 
-      });
-      this.io.emit('device-update', this.getDeviceInfo(device));
+      // Only update status if it's a logout, not a crash
+      if (reason === 'LOGOUT') {
+        device.status = 'disconnected';
+        device.client = null;
+        await this.updateDeviceStatus(id, 'disconnected');
+        
+        this.io.to(`device-${id}`).emit('device-disconnected', { 
+          deviceId: id, 
+          reason 
+        });
+        this.io.emit('device-update', this.getDeviceInfo(device));
+      } else {
+        // For crashes or unexpected disconnections, try to reconnect
+        console.log(`Unexpected disconnection for device ${id}, attempting reconnection...`);
+        device.status = 'reconnecting';
+        await this.updateDeviceStatus(id, 'reconnecting');
+        
+        this.io.emit('device-update', this.getDeviceInfo(device));
+        
+        // Attempt to reconnect after a delay
+        setTimeout(() => {
+          this.reconnectDevice(id);
+        }, 5000);
+      }
     });
 
     client.on('message', async (message) => {
@@ -408,6 +523,23 @@ class DeviceManager {
         } : null
       }));
     } catch (error) {
+      // If session is closed, update device status and trigger reconnection
+      if (error.message && (
+        error.message.includes('Session closed') || 
+        error.message.includes('Protocol error') ||
+        error.message.includes('Target closed')
+      )) {
+        console.error(`Session closed for device ${deviceId}, updating status and reconnecting...`);
+        device.status = 'reconnecting';
+        device.client = null;
+        await this.updateDeviceStatus(deviceId, 'reconnecting');
+        this.io.emit('device-update', this.getDeviceInfo(device));
+        
+        // Trigger reconnection
+        setTimeout(() => {
+          this.reconnectDevice(deviceId);
+        }, 2000);
+      }
       throw new Error(`Failed to get chats: ${error.message}`);
     }
   }
@@ -433,6 +565,23 @@ class DeviceManager {
         isForwarded: message.isForwarded
       }));
     } catch (error) {
+      // If session is closed, update device status and trigger reconnection
+      if (error.message && (
+        error.message.includes('Session closed') || 
+        error.message.includes('Protocol error') ||
+        error.message.includes('Target closed')
+      )) {
+        console.error(`Session closed for device ${deviceId}, updating status and reconnecting...`);
+        device.status = 'reconnecting';
+        device.client = null;
+        await this.updateDeviceStatus(deviceId, 'reconnecting');
+        this.io.emit('device-update', this.getDeviceInfo(device));
+        
+        // Trigger reconnection
+        setTimeout(() => {
+          this.reconnectDevice(deviceId);
+        }, 2000);
+      }
       throw new Error(`Failed to get messages: ${error.message}`);
     }
   }

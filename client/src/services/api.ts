@@ -1,11 +1,17 @@
 import axios from 'axios';
 
-// Use environment variable if available, otherwise use current window location
-// This ensures it works in both development and production
-const API_URL = process.env.REACT_APP_API_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5001');
+// Get API URL at runtime - always use current window location in browser
+// This ensures it works with any domain automatically
+const getApiUrl = () => {
+  if (typeof window !== 'undefined') {
+    return window.location.origin;
+  }
+  // Fallback for SSR or Node.js environments
+  return process.env.REACT_APP_API_URL || 'http://localhost:5001';
+};
 
 export const api = axios.create({
-  baseURL: `${API_URL}/api`,
+  baseURL: `${getApiUrl()}/api`,
   timeout: 30000,
   headers: {
     'Content-Type': 'application/json',

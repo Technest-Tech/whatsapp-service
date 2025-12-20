@@ -28,8 +28,15 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({ children }) => {
 
   const connect = useCallback(() => {
     if (!socket) {
-      // Use current window location for Socket.IO to work with any domain
-      const socketUrl = process.env.REACT_APP_API_URL || window.location.origin;
+      // Get socket URL at runtime - always use current window location in browser
+      // This ensures it works with any domain automatically
+      const getSocketUrl = () => {
+        if (typeof window !== 'undefined') {
+          return window.location.origin;
+        }
+        return process.env.REACT_APP_API_URL || 'http://localhost:5001';
+      };
+      const socketUrl = getSocketUrl();
       const newSocket = io(socketUrl, {
         transports: ['websocket', 'polling'],
         autoConnect: true,
